@@ -1,7 +1,7 @@
 %% @author Anton Fedorov <vorkulsky@gmail.com>
 
 -module(erlangcss).
--export([compile/1]).
+-export([select/2]).
 
 -define(ESCAPE_RE, <<"\\\\[^[:xdigit:]]|\\\\[[:xdigit:]]{1,6}">>).
 
@@ -53,9 +53,65 @@ attr_re() ->
 token_re() ->
     [?TOKEN_RE_1, ?ESCAPE_RE, ?TOKEN_RE_2, ?PSEUDO_CLASS_RE, ?TOKEN_RE_3, attr_re(), ?TOKEN_RE_4].
 
--define(WORD_LEFT, <<"(?:^|.*\\s+)">>).
+select(Tree, Css) ->
+    Pattern = compile(Css),
+    select(Tree, Pattern, []).
 
--define(WORD_RIGHT, <<"(?:\\s+.*|$)">>).
+select(_, [], Results) -> lists:reverse(Results);
+select(Tree, [Head | Tail], Results) ->
+    Result = lists:reverse(apply_selector(Tree, root, Head, [])),
+    select(Tree, Tail, [Result | Results]).
+
+apply_selector(Tree={Tag, _, Children}, Father, Pattern, Result) when not is_atom(Tag) ->
+    apply_selector(Children, Tree, Pattern, corresponds_to_selector(Tree, Father, Pattern, []) ++ Result);
+apply_selector([], _, _, Result) -> lists:reverse(Result);
+apply_selector([Head | Tail], Father, Pattern, Result) ->
+    case Head of
+        {_, _, _} ->
+            NewResult = apply_selector(Head, Father, Pattern, Result),
+            apply_selector(Tail, Father, Pattern, NewResult);
+        _ -> apply_selector(Tail, Father, Pattern, Result)
+    end;
+apply_selector(_, _, _, Result) -> Result.
+
+corresponds_to_selector(_, _, [], Result) -> Result;
+corresponds_to_selector(Tree, Father, [{combinator, <<" ">>} | Tail], Result) ->
+    child(Tree, Father, Tail, Result, mediate);
+corresponds_to_selector(Tree, Father, [{combinator, <<">">>} | Tail], Result) ->
+    child(Tree, Father, Tail, Result, immediate);
+corresponds_to_selector(Tree, Father, [{combinator, <<"~">>} | Tail], Result) ->
+    sibling(Tree, Father, Tail, Result, mediate);
+corresponds_to_selector(Tree, Father, [{combinator, <<"+">>} | Tail], Result) ->
+    sibling(Tree, Father, Tail, Result, immediate);
+corresponds_to_selector(Tree, Father, [Head={element, _, _, _} | Tail], Result) ->
+    corresponds_to_selector(Tree, Father, Tail, corresponds_to_element(Tree, Father, Head) ++ Result).
+
+child(Tree, Father, Tail, Result, _) -> [].
+
+sibling(Tree, Father, Tail, Result, _) -> [].
+
+corresponds_to_element(Element={Tag, Attribs, Children}, Father, {element, {tag, Name}, Pc, Attrs}) ->
+    Bool = if
+        Tag == <<"*">> -> true;
+        true -> ignore_namespace_prefix(Tag, Name)
+    end,
+    case Bool of
+        false -> false;
+        true -> true
+    end.
+
+ignore_namespace_prefix(Tag, Tag) -> true;
+ignore_namespace_prefix(Tag, Name) -> 
+    Match = re:run(Tag, <<"(?:^|:)(.+)$">>, [global]),
+     case Match of
+        {match, Captured} ->
+            Pred = fun([{}, Part]) -> Tag == subbinary(Name, Part) end,
+            case lists:filter(Pred, Captured) of
+                [] -> false;
+                _ -> true
+            end;
+        _ -> false
+    end.
 
 compile(Css) ->
     BCss = iolist_to_binary(Css),
