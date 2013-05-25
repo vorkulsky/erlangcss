@@ -55,63 +55,117 @@ token_re() ->
 
 select(Tree, Css) ->
     Pattern = compile(Css),
-    select(Tree, Pattern, []).
+    recover_selected(select(prepare_tree(Tree), Pattern, [])).
+
+prepare_tree({Tag, Attrs, Children}) when not is_atom(Tag) ->
+    {Tag, make_ref(), Attrs, prepare_tree(Children, [])};
+prepare_tree(Tree) -> Tree.
+
+prepare_tree([], Result) -> lists:reverse(Result);
+prepare_tree([Head | Tail], Result) ->
+    prepare_tree(Tail, [prepare_tree(Head) | Result]).
+
+recover_selected(Selected) -> recover_selected(Selected, []).
+
+recover_selected([], Result) -> lists:reverse(Result);
+recover_selected([Head | Tail], Result) ->
+    recover_selected(Tail, [recover_tree(Head, []) | Result]).
+
+recover_tree({Tag, _, Attrs, Children}) ->
+    {Tag, Attrs, recover_tree(Children, [])};
+recover_tree(Tree) -> Tree.
+
+recover_tree([], Result) -> lists:reverse(Result);
+recover_tree([Head | Tail], Result) ->
+    recover_tree(Tail, [recover_tree(Head) | Result]).
 
 select(_, [], Results) -> lists:reverse(Results);
 select(Tree, [Head | Tail], Results) ->
     Result = lists:reverse(apply_selector(Tree, root, Head, [])),
     select(Tree, Tail, [Result | Results]).
 
-apply_selector(Tree={Tag, _, Children}, Father, Pattern, Result) when not is_atom(Tag) ->
-    apply_selector(Children, Tree, Pattern, corresponds_to_selector(Tree, Father, Pattern, []) ++ Result);
-apply_selector([], _, _, Result) -> lists:reverse(Result);
-apply_selector([Head | Tail], Father, Pattern, Result) ->
-    case Head of
-        {_, _, _} ->
-            NewResult = apply_selector(Head, Father, Pattern, Result),
-            apply_selector(Tail, Father, Pattern, NewResult);
-        _ -> apply_selector(Tail, Father, Pattern, Result)
+apply_selector(Tree={_, _, _, Children}, Father, Pattern, Result) ->
+    case corresponds_to_selector(Tree, Father, Pattern) of
+        true -> apply_selector(Children, Tree, Pattern, [Tree | Result]);
+        false -> apply_selector(Children, Tree, Pattern, Result)
     end;
+apply_selector([Head | Tail], Father, Pattern, Result) ->
+    apply_selector(Tail, Father, Pattern, apply_selector(Head, Father, Pattern, Result));
 apply_selector(_, _, _, Result) -> Result.
 
-corresponds_to_selector(_, _, [], Result) -> Result;
-corresponds_to_selector(Tree, Father, [{combinator, <<" ">>} | Tail], Result) ->
-    child(Tree, Father, Tail, Result, mediate);
-corresponds_to_selector(Tree, Father, [{combinator, <<">">>} | Tail], Result) ->
-    child(Tree, Father, Tail, Result, immediate);
-corresponds_to_selector(Tree, Father, [{combinator, <<"~">>} | Tail], Result) ->
-    sibling(Tree, Father, Tail, Result, mediate);
-corresponds_to_selector(Tree, Father, [{combinator, <<"+">>} | Tail], Result) ->
-    sibling(Tree, Father, Tail, Result, immediate);
-corresponds_to_selector(Tree, Father, [Head={element, _, _, _} | Tail], Result) ->
-    corresponds_to_selector(Tree, Father, Tail, corresponds_to_element(Tree, Father, Head) ++ Result).
+corresponds_to_selector(_, _, []) -> true;
+corresponds_to_selector(Tree, Father, [{combinator, <<" ">>} | Tail]) ->
+    child(Tree, Father, Tail, mediate);
+corresponds_to_selector(Tree, Father, [{combinator, <<">">>} | Tail]) ->
+    child(Tree, Father, Tail, immediate);
+corresponds_to_selector(Tree, Father, [{combinator, <<"~">>} | Tail]) ->
+    sibling(Tree, Father, Tail, mediate);
+corresponds_to_selector(Tree, Father, [{combinator, <<"+">>} | Tail]) ->
+    sibling(Tree, Father, Tail, immediate);
+corresponds_to_selector(Tree, Father, [Head={element, _, _, _} | Tail]) ->
+    corresponds_to_element(Tree, Father, Head) andalso corresponds_to_selector(Tree, Father, Tail).
 
-child(Tree, Father, Tail, Result, _) -> [].
+child(Tree, Father, Tail, _) -> true.
 
-sibling(Tree, Father, Tail, Result, _) -> [].
+sibling(Tree, Father, Tail, _) -> true.
 
-corresponds_to_element(Element={Tag, Attribs, Children}, Father, {element, {tag, Name}, Pc, Attrs}) ->
-    Bool = if
+corresponds_to_element(Element={Tag, _, Attribs, _}, Father, Pattern={element, {tag, Name}, _, Attrs}) ->
+    if
         Tag == <<"*">> -> true;
         true -> ignore_namespace_prefix(Tag, Name)
-    end,
-    case Bool of
-        false -> false;
-        true -> true
-    end.
+    end andalso corresponds_to_pc(Element, Father, Pattern) andalso corresponds_to_attrs(Attribs, Attrs).
 
-ignore_namespace_prefix(Tag, Tag) -> true;
-ignore_namespace_prefix(Tag, Name) -> 
-    Match = re:run(Tag, <<"(?:^|:)(.+)$">>, [global]),
-     case Match of
-        {match, Captured} ->
-            Pred = fun([{}, Part]) -> Tag == subbinary(Name, Part) end,
-            case lists:filter(Pred, Captured) of
-                [] -> false;
-                _ -> true
-            end;
+ignore_namespace_prefix(Name, Name) -> true;
+ignore_namespace_prefix(Name, Pattern) -> 
+    case re:run(Name, <<":(.+)$">>) of
+        {match, [_, Part]} -> subbinary(Name, Part) == Pattern;
         _ -> false
     end.
+
+corresponds_to_attrs(_, []) -> true;
+corresponds_to_attrs(Attrs, [Head | Tail]) ->
+    corresponds_to_attr(Attrs, Head) andalso corresponds_to_attrs(Attrs, Tail).
+
+corresponds_to_attr([], _) -> false;
+corresponds_to_attr([Head | Tail], Pattern) ->
+    corresponds_to_attr(Head, Pattern) orelse corresponds_to_attr(Tail, Pattern);
+corresponds_to_attr({Name, Value}, {attr, PName, PValue}) ->
+    ignore_namespace_prefix(Name, PName) andalso corresponds_to_value(Value, PValue).
+
+corresponds_to_value(_, none) -> true;
+corresponds_to_value(Value, {exact, PValue}) -> Value == PValue;
+corresponds_to_value(Value, {prefix, PValue}) ->
+    case binary:match(Value, PValue) of
+        {0, _} -> true;
+        _ -> false
+    end;
+corresponds_to_value(Value, {suffix, PValue}) ->
+    case binary:match(Value, PValue) of
+        {Pos, Len} -> Pos+Len == byte_size(Value);
+        _ -> false
+    end;
+corresponds_to_value(Value, {contain, PValue}) ->
+    case binary:match(Value, PValue) of
+        nomatch -> false;
+        _ -> true
+    end;
+corresponds_to_value(Value, {separated, PValue}) ->
+    case binary:match(Value, PValue) of
+        {Pos, Len} -> Pos == 0 orelse Pos+Len == byte_size(Value) orelse
+                      is_whitespace(Value, Pos-1) orelse
+                      is_whitespace(Value, Pos+Len);
+        _ -> false
+    end.
+
+is_whitespace(Value, Pos) ->
+    Char = binary:part(Value, Pos, 1),
+    Match = re:run(Char, <<"\s">>),
+    case Match of
+        {match, _} -> true;
+        _ -> false
+    end.
+    
+corresponds_to_pc(Element, Father, Pattern) -> true.
 
 compile(Css) ->
     BCss = iolist_to_binary(Css),
@@ -153,7 +207,7 @@ compile_element(Element, Pc, Attrs) ->
     {_, RE} = re:compile(<<"^(?:\\\\\\.|\\\\\\#|[^.#])+">>),
     Match = re:run(Element, RE),
     {Tag, Coi} = case Match of
-        {match, [{Offset, Len}]} when Len > 0 -> {unescape(subbinary(Element, {Offset, Len})), subbinary(Element, Offset+Len)};
+        {match, [{Pos, Len}]} when Len > 0 -> {unescape(subbinary(Element, {Pos, Len})), subbinary(Element, Pos+Len)};
         _ -> {<<"*">>, Element}
     end,
     {element, {tag, Tag}, compile_pc(Pc), compile_class_or_id(Coi) ++ compile_attrs(Attrs)}.
@@ -220,12 +274,11 @@ include_op(<<"*">>, Value) -> {contain, unescape(Value)};
 include_op(_, Value) -> {exact, unescape(Value)}.
 
 subbinary(_, {_, 0}) -> none;
-subbinary(Raw, {Offset, Len}) ->
-    <<_:Offset/binary, Part:Len/binary, _/binary>> = Raw,
-    Part;
+subbinary(Raw, {Pos, Len}) ->
+    binary:part(Raw, {Pos, Len});
 subbinary(Raw, 0) -> Raw;
-subbinary(Raw, Offset) ->
-    <<_:Offset/binary, Part/binary>> = Raw,
+subbinary(Raw, Pos) ->
+    <<_:Pos/binary, Part/binary>> = Raw,
     Part.
 
 unescape(Value) ->
@@ -252,10 +305,10 @@ unescape_unicode_characters(Value) ->
 
 convert_unicode_characters(Value, [], Unescaped, _) -> 
     lists:reverse([Value | Unescaped]);
-convert_unicode_characters(Value, [[{Offset, AllLen}, {_, Len}] | Tail], Unescaped, Shift) ->
+convert_unicode_characters(Value, [[{Pos, AllLen}, {_, Len}] | Tail], Unescaped, Shift) ->
     Numspaces = AllLen-Len-1,
-    Pos = Offset-Shift,
-    <<Prefix:Pos/binary, _:1/binary, Escapchar:Len/binary, _:Numspaces/binary, Suffix/binary>> = Value,
+    Offset = Pos-Shift,
+    <<Prefix:Offset/binary, _:1/binary, Escapchar:Len/binary, _:Numspaces/binary, Suffix/binary>> = Value,
     Char = case charref(Escapchar) of
         undefined -> <<>>;
         Unichar -> unicode:characters_to_binary([Unichar])
@@ -442,4 +495,24 @@ compile_test() ->
         ]]),
     ok.
 
+select_test() ->
+    ?assertEqual(
+        select(mochiweb_html:parse(<<"<html><div><p id=a></p></div><p id=b></p></html>">>), <<"p">>),
+        [[
+            {<<"p">>,[{<<"id">>,<<"a">>}],[]},
+            {<<"p">>,[{<<"id">>,<<"b">>}],[]}
+        ]]),
+    T1 = mochiweb_html:parse(<<"<html><p id=a class=a data=\"d1 a d2\"></p><p id=b class=\"b c\" t data=\"d1 d3\"></p></html>">>),
+    P1 = {<<"p">>,[{<<"id">>,<<"a">>},{<<"class">>,<<"a">>},{<<"data">>,<<"d1 a d2">>}],[]},
+    P2 = {<<"p">>,[{<<"id">>,<<"b">>},{<<"class">>,<<"b c">>},{<<"t">>,<<"t">>}, {<<"data">>,<<"d1 d3">>}],[]},
+    ?assertEqual(select(T1, <<"p#a">>), [[P1]]),
+    ?assertEqual(select(T1, <<"p.c">>), [[P2]]),
+    ?assertEqual(select(T1, <<"p[t]">>), [[P2]]),
+    ?assertEqual(select(T1, <<"p[data=\"d1 d3\"]">>), [[P2]]),
+    ?assertEqual(select(T1, <<"p[data^=\"d\"]">>), [[P1,P2]]),
+    ?assertEqual(select(T1, <<"p[data$=\"2\"]">>), [[P1]]),
+    ?assertEqual(select(T1, <<"p[data*=\"1\"]">>), [[P1,P2]]),
+    ?assertEqual(select(T1, <<"p[data~=\"a\"][data~=\"d1\"][data~=\"d2\"]">>), [[P1]]),
+    ?assertEqual(select(T1, <<"p.c[data~=\"d1\"]">>), [[P2]]),
+    ok.
 -endif.
