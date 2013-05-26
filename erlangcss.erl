@@ -81,39 +81,55 @@ recover_tree([Head | Tail], Result) ->
 
 select(_, [], Results) -> lists:reverse(Results);
 select(Tree, [Head | Tail], Results) ->
-    Result = lists:reverse(apply_selector(Tree, root, Head, [])),
+    Result = lists:reverse(apply_selector(Tree, [root], lists:reverse(Head), [])),
     select(Tree, Tail, [Result | Results]).
 
-apply_selector(Tree={_, _, _, Children}, Father, Pattern, Result) ->
-    case corresponds_to_selector(Tree, Father, Pattern) of
-        true -> apply_selector(Children, Tree, Pattern, [Tree | Result]);
-        false -> apply_selector(Children, Tree, Pattern, Result)
+apply_selector(Node={_, _, _, Children}, Fathers, Pattern, Result) ->
+    case corresponds_to_selector(Node, Fathers, Pattern) of
+        true -> apply_selector(Children, [Node | Fathers], Pattern, [Node | Result]);
+        false -> apply_selector(Children, [Node | Fathers], Pattern, Result)
     end;
-apply_selector([Head | Tail], Father, Pattern, Result) ->
-    apply_selector(Tail, Father, Pattern, apply_selector(Head, Father, Pattern, Result));
+apply_selector([Head | Tail], Fathers, Pattern, Result) ->
+    apply_selector(Tail, Fathers, Pattern, apply_selector(Head, Fathers, Pattern, Result));
 apply_selector(_, _, _, Result) -> Result.
 
 corresponds_to_selector(_, _, []) -> true;
-corresponds_to_selector(Tree, Father, [{combinator, <<" ">>} | Tail]) ->
-    child(Tree, Father, Tail, mediate);
-corresponds_to_selector(Tree, Father, [{combinator, <<">">>} | Tail]) ->
-    child(Tree, Father, Tail, immediate);
-corresponds_to_selector(Tree, Father, [{combinator, <<"~">>} | Tail]) ->
-    sibling(Tree, Father, Tail, mediate);
-corresponds_to_selector(Tree, Father, [{combinator, <<"+">>} | Tail]) ->
-    sibling(Tree, Father, Tail, immediate);
-corresponds_to_selector(Tree, Father, [Head={element, _, _, _} | Tail]) ->
-    corresponds_to_element(Tree, Father, Head) andalso corresponds_to_selector(Tree, Father, Tail).
+corresponds_to_selector(Node, Fathers, [{combinator, <<" ">>} | Tail]) ->
+    ancestor(Fathers, Tail);
+corresponds_to_selector(Node, Fathers, [{combinator, <<">">>} | Tail]) ->
+    parent(Fathers, Tail);
+corresponds_to_selector(Node, Fathers, [{combinator, <<"~">>} | Tail]) ->
+    sibling(Node, Fathers, Tail, mediate);
+corresponds_to_selector(Node, Fathers, [{combinator, <<"+">>} | Tail]) ->
+    sibling(Node, Fathers, Tail, immediate);
+corresponds_to_selector(Node, Fathers, [Head={element, _, _, _} | Tail]) ->
+    corresponds_to_element(Node, Fathers, Head) andalso corresponds_to_selector(Node, Fathers, Tail).
 
-child(Tree, Father, Tail, _) -> true.
+ancestor([root], _) -> false;
+ancestor([Father | Fathers], Pattern) ->
+    corresponds_to_selector(Father, Fathers, Pattern) orelse ancestor(Fathers, Pattern).
 
-sibling(Tree, Father, Tail, _) -> true.
+parent([root], _) -> false;
+parent([Father | Fathers], Pattern) ->
+    corresponds_to_selector(Father, Fathers, Pattern).
 
-corresponds_to_element(Element={Tag, _, Attribs, _}, Father, Pattern={element, {tag, Name}, _, Attrs}) ->
+sibling(_, [root], _, _) -> false;
+sibling({_, Ref, _, _}, Fathers=[{_, _, _, Children} | _], Pattern, Nearness) ->
+    run_by_children(Ref, Fathers, Children, Pattern, Nearness, false).
+
+run_by_children(Ref, _, [{_, Ref, _, _} | _], _, _, Found) -> Found;
+run_by_children(Ref, Fathers, [Child={_, _, _, _} | Children], Pattern, immediate, Found) ->
+    run_by_children(Ref, Fathers, Children, Pattern, immediate, corresponds_to_selector(Child, Fathers, Pattern));
+run_by_children(Ref, Fathers, [Child={_, _, _, _} | Children], Pattern, mediate, Found) ->
+    corresponds_to_selector(Child, Fathers, Pattern) orelse run_by_children(Ref, Fathers, Children, Pattern, mediate, Found);
+run_by_children(Ref, Fathers, [_ | Children], Pattern, Nearness, Found) ->
+    run_by_children(Ref, Fathers, Children, Pattern, Nearness, Found).
+
+corresponds_to_element(Element={Tag, _, Attribs, _}, Fathers, Pattern={element, {tag, Name}, _, Attrs}) ->
     if
-        Tag == <<"*">> -> true;
+        Name == <<"*">> -> true;
         true -> ignore_namespace_prefix(Tag, Name)
-    end andalso corresponds_to_pc(Element, Father, Pattern) andalso corresponds_to_attrs(Attribs, Attrs).
+    end andalso corresponds_to_pc(Element, Fathers, Pattern) andalso corresponds_to_attrs(Attribs, Attrs).
 
 ignore_namespace_prefix(Name, Name) -> true;
 ignore_namespace_prefix(Name, Pattern) -> 
@@ -493,26 +509,73 @@ compile_test() ->
                 {combinator, <<"+">>},
                 {element, {tag, <<"a">>}, [], []}
         ]]),
+    ?assertEqual(
+        compile(<<"div *">>),
+        [[
+            {element, {tag, <<"div">>}, [], []},
+            {combinator, <<" ">>},
+            {element, {tag, <<"*">>}, [], []}
+        ]]),
     ok.
 
-select_test() ->
+corresponds_to_element_test() ->
     ?assertEqual(
-        select(mochiweb_html:parse(<<"<html><div><p id=a></p></div><p id=b></p></html>">>), <<"p">>),
-        [[
-            {<<"p">>,[{<<"id">>,<<"a">>}],[]},
-            {<<"p">>,[{<<"id">>,<<"b">>}],[]}
-        ]]),
-    T1 = mochiweb_html:parse(<<"<html><p id=a class=a data=\"d1 a d2\"></p><p id=b class=\"b c\" t data=\"d1 d3\"></p></html>">>),
-    P1 = {<<"p">>,[{<<"id">>,<<"a">>},{<<"class">>,<<"a">>},{<<"data">>,<<"d1 a d2">>}],[]},
-    P2 = {<<"p">>,[{<<"id">>,<<"b">>},{<<"class">>,<<"b c">>},{<<"t">>,<<"t">>}, {<<"data">>,<<"d1 d3">>}],[]},
-    ?assertEqual(select(T1, <<"p#a">>), [[P1]]),
-    ?assertEqual(select(T1, <<"p.c">>), [[P2]]),
-    ?assertEqual(select(T1, <<"p[t]">>), [[P2]]),
-    ?assertEqual(select(T1, <<"p[data=\"d1 d3\"]">>), [[P2]]),
-    ?assertEqual(select(T1, <<"p[data^=\"d\"]">>), [[P1,P2]]),
-    ?assertEqual(select(T1, <<"p[data$=\"2\"]">>), [[P1]]),
-    ?assertEqual(select(T1, <<"p[data*=\"1\"]">>), [[P1,P2]]),
-    ?assertEqual(select(T1, <<"p[data~=\"a\"][data~=\"d1\"][data~=\"d2\"]">>), [[P1]]),
-    ?assertEqual(select(T1, <<"p.c[data~=\"d1\"]">>), [[P2]]),
+        corresponds_to_element({<<"html">>, make_ref(), [], []}, root, {element, {tag, <<"*">>}, [], []}),
+        true),
     ok.
+
+select_by_tag_test() ->
+    Tree = mochiweb_html:parse(<<"<html><div><p id=a></p></div><p id=b></p></html>">>),
+    Div = mochiweb_html:parse(<<"<div><p id=a></p></div>">>),
+    P1 = mochiweb_html:parse(<<"<p id=a></p>">>),
+    P2 = mochiweb_html:parse(<<"<p id=b></p>">>),
+    ?assertEqual(select(Tree, <<"p">>),[[P1, P2]]),
+    ?assertEqual(select(Tree, <<"*">>),[[Tree, Div, P1, P2]]),
+    ok.
+
+select_by_attrs_test() ->
+    Tree = mochiweb_html:parse(<<"<html><p id=a class=a data=\"d1 a d2\"></p><p id=b class=\"b c\" t data=\"d1 d3\"></p></html>">>),
+    P1 = mochiweb_html:parse(<<"<p id=a class=a data=\"d1 a d2\"></p>">>),
+    P2 = mochiweb_html:parse(<<"<p id=b class=\"b c\" t data=\"d1 d3\"></p>">>),
+    ?assertEqual(select(Tree, <<"p#a">>), [[P1]]),
+    ?assertEqual(select(Tree, <<"p.c">>), [[P2]]),
+    ?assertEqual(select(Tree, <<"p[t]">>), [[P2]]),
+    ?assertEqual(select(Tree, <<"p[data=\"d1 d3\"]">>), [[P2]]),
+    ?assertEqual(select(Tree, <<"p[data^=\"d\"]">>), [[P1, P2]]),
+    ?assertEqual(select(Tree, <<"p[data$=\"2\"]">>), [[P1]]),
+    ?assertEqual(select(Tree, <<"p[data*=\"1\"]">>), [[P1, P2]]),
+    ?assertEqual(select(Tree, <<"p[data~=\"a\"][data~=\"d1\"][data~=\"d2\"]">>), [[P1]]),
+    ?assertEqual(select(Tree, <<"p.c[data~=\"d1\"]">>), [[P2]]),
+    ok.
+
+select_by_combinators_test() ->
+    Tree = mochiweb_html:parse(<<"<html><div><p><a></a></p>text1<div></div>text2<p>text3</p></div><p></p><div><br/></div></html>">>),
+    P1 = mochiweb_html:parse(<<"<p><a></a></p>">>),
+    A = {<<"a">>, [], []},
+    Div2 = {<<"div">>, [], []},
+    P2 = mochiweb_html:parse(<<"<p>text3</p>">>),
+    Div3 = mochiweb_html:parse(<<"<div><br/></div>">>),
+    Br = {<<"br">>, [], []},
+    ?assertEqual(select(Tree, <<"div > p">>), [[P1, P2]]),
+    ?assertEqual(select(Tree, <<"div > *">>), [[P1, Div2, P2, Br]]),
+    ?assertEqual(select(Tree, <<"div *">>), [[P1, A, Div2, P2, Br]]),
+    ?assertEqual(select(Tree, <<"html ~ *">>), [[]]),
+    ?assertEqual(select(Tree, <<"p ~ *">>), [[Div2, P2, Div3]]),
+    ?assertEqual(select(Tree, <<"p + div">>), [[Div2, Div3]]),
+    ?assertEqual(select(Tree, <<"html div p">>), [[P1, P2]]),
+    ?assertEqual(select(Tree, <<"div ~ * > br">>), [[Br]]),
+    ?assertEqual(select(Tree, <<"div ~ * + *">>), [[Div3]]),
+    ok.
+
+select_by_separators_test() ->
+    Tree = mochiweb_html:parse(<<"<html><div><p></p></div><div><a></a></div></html>">>),
+    ?assertEqual(
+        select(Tree, <<"div p, a, div">>),
+        [
+            [{<<"p">>,[],[]}],
+            [{<<"a">>,[],[]}],
+            [{<<"div">>,[],[{<<"p">>,[],[]}]}, {<<"div">>,[],[{<<"a">>,[],[]}]}]
+        ]),
+    ok.
+
 -endif.
