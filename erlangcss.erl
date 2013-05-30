@@ -94,9 +94,9 @@ apply_selector([Head | Tail], Fathers, Pattern, Result) ->
 apply_selector(_, _, _, Result) -> Result.
 
 corresponds_to_selector(_, _, []) -> true;
-corresponds_to_selector(Node, Fathers, [{combinator, <<" ">>} | Tail]) ->
+corresponds_to_selector(_, Fathers, [{combinator, <<" ">>} | Tail]) ->
     ancestor(Fathers, Tail);
-corresponds_to_selector(Node, Fathers, [{combinator, <<">">>} | Tail]) ->
+corresponds_to_selector(_, Fathers, [{combinator, <<">">>} | Tail]) ->
     parent(Fathers, Tail);
 corresponds_to_selector(Node, Fathers, [{combinator, <<"~">>} | Tail]) ->
     sibling(Node, Fathers, Tail, mediate);
@@ -118,7 +118,7 @@ sibling({_, Ref, _, _}, Fathers=[{_, _, _, Children} | _], Pattern, Nearness) ->
     run_by_children(Ref, Fathers, Children, Pattern, Nearness, false).
 
 run_by_children(Ref, _, [{_, Ref, _, _} | _], _, _, Found) -> Found;
-run_by_children(Ref, Fathers, [Child={_, _, _, _} | Children], Pattern, immediate, Found) ->
+run_by_children(Ref, Fathers, [Child={_, _, _, _} | Children], Pattern, immediate, _) ->
     run_by_children(Ref, Fathers, Children, Pattern, immediate, corresponds_to_selector(Child, Fathers, Pattern));
 run_by_children(Ref, Fathers, [Child={_, _, _, _} | Children], Pattern, mediate, Found) ->
     corresponds_to_selector(Child, Fathers, Pattern) orelse run_by_children(Ref, Fathers, Children, Pattern, mediate, Found);
@@ -181,7 +181,125 @@ is_whitespace(Value, Pos) ->
         _ -> false
     end.
     
-corresponds_to_pc(Element, Father, Pattern) -> true.
+corresponds_to_pc(Element, Fathers, {element, _, Pc, _}) ->
+    corresponds_to_pcs(Element, Fathers, Pc).
+
+corresponds_to_pcs(_, _, []) -> true;
+corresponds_to_pcs(Element, Fathers, [{pc, Class, Args} | Tail]) ->
+    first_filter(Element, Fathers, Class, Args) andalso corresponds_to_pcs(Element, Fathers, Tail).
+
+first_filter(Element, Fathers, Class, Args) ->
+    Match = re:run(Class, <<"^first-(?:(child)|of-type)$">>),
+    case Match of
+        {match, [_, {_, 0}]} -> pc_selection(Element, Fathers, <<"nth-of-type">>, <<"1">>);
+        {match, _} -> pc_selection(Element, Fathers, <<"nth-child">>, <<"1">>);
+        _ -> last_filter(Element, Fathers, Class, Args)
+    end.
+
+last_filter(Element, Fathers, Class, Args) ->
+    Match = re:run(Class, <<"^last-(?:(child)|of-type)$">>),
+    case Match of
+        {match, [_, {_, 0}]} -> pc_selection(Element, Fathers, <<"nth-last-of-type">>, <<"-n+1">>);
+        {match, _} -> pc_selection(Element, Fathers, <<"nth-last-child">>, <<"-n+1">>);
+        _ -> pc_selection(Element, Fathers, Class, Args)
+    end.
+
+pc_selection({_, _, Attribs, _}, _, <<"checked">>, _) ->
+    corresponds_to_attr(Attribs, {attr, <<"checked">>, none}) orelse
+    corresponds_to_attr(Attribs, {attr, <<"selected">>, none});
+pc_selection({_, _, _, Children}, _, <<"empty">>, _) -> is_zero_length(Children);
+pc_selection(_, [root], <<"root">>, _) -> true;
+pc_selection(_, _, <<"root">>, _) -> false;
+pc_selection(Element, Fathers, <<"not">>, Args) -> not corresponds_to_selector(Element, Fathers, [Args]);
+pc_selection(Element, Fathers, Class, Args) -> pc_nth(Element, Fathers, Class, Args).
+
+is_zero_length([]) -> true;
+is_zero_length([Head | Tail]) ->
+    is_zero_length(Head) andalso is_zero_length(Tail);
+is_zero_length({comment, _}) -> true;
+is_zero_length(_) -> false.
+
+pc_nth(Element={_, Ref, _, _}, Fathers, Class, Args) ->
+    Match = re:run(Class, <<"^nth-">>),
+    case Match of
+        {match, _} -> 
+            Pair = equation(Args),
+            Siblings = get_siblings(Element, Fathers, Class),
+            RSiblings = 
+                case re:run(Class, <<"^nth-last">>) of
+                    {match, _} -> lists:reverse(Siblings);
+                    _ -> Siblings
+                end,
+            find_itself_nth(Ref, RSiblings, length(RSiblings), 0, 0, Pair);
+        _ -> pc_only(Element, Fathers, Class, Args)
+    end.
+
+get_siblings(Element, [root], _) -> [Element];
+get_siblings({Type, _, _, _}, [{_, _, _, Children} | _], Class) ->
+    case re:run(Class, <<"of-type$">>) of
+        {match, _} -> get_siblings_list(Children, Type, []);
+        _ -> get_siblings_list(Children, notype, [])
+    end.
+
+get_siblings_list([], _, Result) -> lists:reverse(Result);
+get_siblings_list([Head | Tail], Type, Result) ->
+    case is_sibling(Head, Type) of
+        true -> get_siblings_list(Tail, Type, [Head | Result]);
+        false -> get_siblings_list(Tail, Type, Result)
+    end.
+
+is_sibling({_, _, _, _}, notype) -> true;
+is_sibling({Type, _, _, _}, Type) -> true;
+is_sibling({_, _, _, _}, _) -> false;
+is_sibling(_, _) -> false.
+
+find_itself_nth(Ref, Siblings, Len, Counter, Shift, Pair={A, B}) ->
+    Result = A*Counter + B,
+    if
+        Result < 1 -> find_itself_nth(Ref, Siblings, Len, Counter+1, Shift, Pair);
+        Result-1 > Len -> false;
+        true -> N = Result-Shift,
+            [Sibling | Tail] = lists:nthtail(N-1, Siblings),
+            case Sibling of
+                {Ref, _, _, _} -> true;
+                _ -> find_itself_nth(Ref, Tail, Len-N-1, Counter+1, Shift+N, Pair)
+            end
+    end.
+
+equation(Equation) ->
+    case re:run(Equation, <<"^even$">>, [caseless]) of
+        {match, _} -> {2, 2};
+        _ -> case re:run(Equation, <<"^odd$">>, [caseless]) of
+                {match, _} -> {2, 1};
+                _ -> {_, RE} = re:compile(<<"(?:(-?(?:\\d+)?)?(n))?\\s*\\+?\\s*(-?\\d+)?\\s*$">>, [caseless]),
+                     {match, Captured} = re:run(Equation, RE),
+                     analyze_captured(Equation, Captured)
+             end
+    end.
+
+analyze_captured(_, [{_, 0}]) -> {0, 0};
+analyze_captured(Equation, [_, A, B]) -> {analyze_captured_first(Equation, A, B), 0};
+analyze_captured(Equation, [_, A, B, C]) ->
+    {analyze_captured_first(Equation, A, B), analyze_captured_second(Equation, C)}.
+
+analyze_captured_first(_, {_, 0}, {_, 0}) -> 0;
+analyze_captured_first(_, {_, 0}, {_, 1}) -> 1;
+analyze_captured_first(Equation, A, {_, 1}) ->
+    case binary:part(Equation, A) of
+        <<"-">> -> -1;
+        Part -> list_to_integer(binary_to_list(Part))
+    end.
+
+analyze_captured_second(Equation, C) ->
+    list_to_integer(binary_to_list(binary:part(Equation, C))).
+
+pc_only(Element, Fathers, Class, Args) ->
+    Match = re:run(Class, <<"^only-(?:child|(of-type))$">>),
+    case Match of
+        {match, [_, {_, 0}]} -> true;
+        {match, _} -> true;
+        _ -> false
+    end.
 
 compile(Css) ->
     BCss = iolist_to_binary(Css),
@@ -576,6 +694,82 @@ select_by_separators_test() ->
             [{<<"a">>,[],[]}],
             [{<<"div">>,[],[{<<"p">>,[],[]}]}, {<<"div">>,[],[{<<"a">>,[],[]}]}]
         ]),
+    ok.
+
+equation_test() ->
+    ?assertEqual(equation(<<"even">>), {2, 2}),
+    ?assertEqual(equation(<<"odd">>), {2, 1}),
+    ?assertEqual(equation(<<"">>), {0, 0}),
+    ?assertEqual(equation(<<"abraca">>), {0, 0}),
+    ?assertEqual(equation(<<"-2">>), {0, -2}),
+    ?assertEqual(equation(<<"n">>), {1, 0}),
+    ?assertEqual(equation(<<"-n">>), {-1, 0}),
+    ?assertEqual(equation(<<"-4n+8">>), {-4, 8}),
+    ?assertEqual(equation(<<"4n-8">>), {4, -8}),
+    ok.
+
+find_itself_nth_test() ->
+    Ref = make_ref(),
+    Siblings = [{make_ref(),a1,b1,c1}, {Ref,a2,b2,c2}, {make_ref(),a3,b3,c3}, {make_ref(),a4,b4,c4}],
+    ?assertEqual(
+        find_itself_nth(Ref, Siblings, length(Siblings), 0, 0, {2, 2}),
+        true
+    ),
+    ?assertEqual(
+        find_itself_nth(Ref, Siblings, length(Siblings), 0, 0, {2, 1}),
+        false
+    ),
+    ?assertEqual(
+        find_itself_nth(Ref, Siblings, length(Siblings), 0, 0, {0, 2}),
+        true
+    ),
+    ?assertEqual(
+        find_itself_nth(Ref, Siblings, length(Siblings), 0, 0, {0, 3}),
+        false
+    ),
+    ?assertEqual(
+        find_itself_nth(Ref, Siblings, length(Siblings), 0, 0, {-3, 8}),
+        true
+    ),
+    ok.
+
+select_by_pc_test() ->
+    ?assertEqual(
+        select(mochiweb_html:parse(<<"<html><p checked></p><p selected></p><p></p></html>">>), <<":checked">>),
+        [[
+            {<<"p">>,[{<<"checked">>,<<"checked">>}],[]},
+            {<<"p">>,[{<<"selected">>,<<"selected">>}],[]}
+        ]]),
+    ?assertEqual(
+        select(mochiweb_html:parse(<<"<html><div><p></p></div><b><!--A--><!--B--></b></html>">>), <<":empty">>),
+        [[
+            {<<"p">>,[],[]},
+            {<<"b">>,[],[{comment,<<"A">>},{comment,<<"B">>}]}
+        ]]),
+    Tree3 = mochiweb_html:parse(<<"<html><br/></html>">>),
+    ?assertEqual(select(Tree3, <<":root">>), [[Tree3]]),
+    Tree4 = mochiweb_html:parse(<<"<html><p id=\"a\"></p><p id=\"b\"></p><p></p></html>">>),
+    ?assertEqual(
+        select(Tree4, <<"p:not(#a)">>),
+        [[
+            {<<"p">>,[{<<"id">>,<<"b">>}],[]},
+            {<<"p">>,[],[]}
+        ]]),
+    ?assertEqual(
+        select(Tree4, <<"p:first-child">>),
+        [[
+            {<<"p">>,[{<<"id">>,<<"a">>}],[]}
+        ]]),
+    ?assertEqual(
+        select(Tree4, <<"p:nth-child(2n-1)">>),
+        [[
+            {<<"p">>,[{<<"id">>,<<"a">>}],[]}
+        ]]),
+    ?assertEqual(
+        select(Tree4, <<"p:nth-child(odd)">>),
+        [[
+            {<<"p">>,[{<<"id">>,<<"a">>}],[]}
+        ]]),
     ok.
 
 -endif.
