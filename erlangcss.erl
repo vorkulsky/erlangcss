@@ -191,16 +191,16 @@ corresponds_to_pcs(Element, Fathers, [{pc, Class, Args} | Tail]) ->
 first_filter(Element, Fathers, Class, Args) ->
     Match = re:run(Class, <<"^first-(?:(child)|of-type)$">>),
     case Match of
-        {match, [_, {_, 0}]} -> pc_selection(Element, Fathers, <<"nth-of-type">>, <<"1">>);
-        {match, _} -> pc_selection(Element, Fathers, <<"nth-child">>, <<"1">>);
+        {match, [_, {_, 0}]} -> pc_selection(Element, Fathers, <<"nth-child">>, <<"1">>);
+        {match, _} -> pc_selection(Element, Fathers, <<"nth-of-type">>, <<"1">>);
         _ -> last_filter(Element, Fathers, Class, Args)
     end.
 
 last_filter(Element, Fathers, Class, Args) ->
     Match = re:run(Class, <<"^last-(?:(child)|of-type)$">>),
     case Match of
-        {match, [_, {_, 0}]} -> pc_selection(Element, Fathers, <<"nth-last-of-type">>, <<"-n+1">>);
-        {match, _} -> pc_selection(Element, Fathers, <<"nth-last-child">>, <<"-n+1">>);
+        {match, [_, {_, 0}]} -> pc_selection(Element, Fathers, <<"nth-last-child">>, <<"-n+1">>);
+        {match, _} -> pc_selection(Element, Fathers, <<"nth-last-of-type">>, <<"-n+1">>);
         _ -> pc_selection(Element, Fathers, Class, Args)
     end.
 
@@ -230,7 +230,7 @@ pc_nth(Element={_, Ref, _, _}, Fathers, Class, Args) ->
                     {match, _} -> lists:reverse(Siblings);
                     _ -> Siblings
                 end,
-            find_itself_nth(Ref, RSiblings, length(RSiblings), 0, 0, Pair);
+            find_itself_nth(Ref, RSiblings, length(RSiblings), 0, Pair);
         _ -> pc_only(Element, Fathers, Class, Args)
     end.
 
@@ -243,26 +243,26 @@ get_siblings({Type, _, _, _}, [{_, _, _, Children} | _], Class) ->
 
 get_siblings_list([], _, Result) -> lists:reverse(Result);
 get_siblings_list([Head | Tail], Type, Result) ->
-    case is_sibling(Head, Type) of
+    case is_sibling_right_type(Head, Type) of
         true -> get_siblings_list(Tail, Type, [Head | Result]);
         false -> get_siblings_list(Tail, Type, Result)
     end.
 
-is_sibling({_, _, _, _}, notype) -> true;
-is_sibling({Type, _, _, _}, Type) -> true;
-is_sibling({_, _, _, _}, _) -> false;
-is_sibling(_, _) -> false.
+is_sibling_right_type({_, _, _, _}, notype) -> true;
+is_sibling_right_type({Type, _, _, _}, Type) -> true;
+is_sibling_right_type({_, _, _, _}, _) -> false;
+is_sibling_right_type(_, _) -> false.
 
-find_itself_nth(Ref, Siblings, Len, Counter, Shift, Pair={A, B}) ->
+find_itself_nth(_, _, Len, Counter, _) when Counter > Len -> false;
+find_itself_nth(Ref, Siblings, Len, Counter, Pair={A, B}) ->
     Result = A*Counter + B,
     if
-        Result < 1 -> find_itself_nth(Ref, Siblings, Len, Counter+1, Shift, Pair);
-        Result-1 > Len -> false;
-        true -> N = Result-Shift,
-            [Sibling | Tail] = lists:nthtail(N-1, Siblings),
+        Result < 1 -> find_itself_nth(Ref, Siblings, Len, Counter+1, Pair);
+        Result > Len -> false;
+        true -> Sibling = lists:nth(Result, Siblings),
             case Sibling of
-                {Ref, _, _, _} -> true;
-                _ -> find_itself_nth(Ref, Tail, Len-N-1, Counter+1, Shift+N, Pair)
+                {_, Ref, _, _} -> true;
+                _ -> find_itself_nth(Ref, Siblings, Len, Counter+1, Pair)
             end
     end.
 
@@ -710,27 +710,13 @@ equation_test() ->
 
 find_itself_nth_test() ->
     Ref = make_ref(),
-    Siblings = [{make_ref(),a1,b1,c1}, {Ref,a2,b2,c2}, {make_ref(),a3,b3,c3}, {make_ref(),a4,b4,c4}],
-    ?assertEqual(
-        find_itself_nth(Ref, Siblings, length(Siblings), 0, 0, {2, 2}),
-        true
-    ),
-    ?assertEqual(
-        find_itself_nth(Ref, Siblings, length(Siblings), 0, 0, {2, 1}),
-        false
-    ),
-    ?assertEqual(
-        find_itself_nth(Ref, Siblings, length(Siblings), 0, 0, {0, 2}),
-        true
-    ),
-    ?assertEqual(
-        find_itself_nth(Ref, Siblings, length(Siblings), 0, 0, {0, 3}),
-        false
-    ),
-    ?assertEqual(
-        find_itself_nth(Ref, Siblings, length(Siblings), 0, 0, {-3, 8}),
-        true
-    ),
+    Siblings = [{a1, make_ref(), b1, c1}, {a2, Ref, b2, c2}, {a3, make_ref(), b3, c3}, {a4, make_ref(), b4, c4}],
+    Len = length(Siblings),
+    ?assertEqual(find_itself_nth(Ref, Siblings, Len, 0, {2, 2}), true),
+    ?assertEqual(find_itself_nth(Ref, Siblings, Len, 0, {2, 1}), false),
+    ?assertEqual(find_itself_nth(Ref, Siblings, Len, 0, {0, 2}), true),
+    ?assertEqual(find_itself_nth(Ref, Siblings, Len, 0, {0, 3}), false),
+    ?assertEqual(find_itself_nth(Ref, Siblings, Len, 0, {3, -7}), true),
     ok.
 
 select_by_pc_test() ->
@@ -746,30 +732,29 @@ select_by_pc_test() ->
             {<<"p">>,[],[]},
             {<<"b">>,[],[{comment,<<"A">>},{comment,<<"B">>}]}
         ]]),
-    Tree3 = mochiweb_html:parse(<<"<html><br/></html>">>),
-    ?assertEqual(select(Tree3, <<":root">>), [[Tree3]]),
-    Tree4 = mochiweb_html:parse(<<"<html><p id=\"a\"></p><p id=\"b\"></p><p></p></html>">>),
-    ?assertEqual(
-        select(Tree4, <<"p:not(#a)">>),
-        [[
-            {<<"p">>,[{<<"id">>,<<"b">>}],[]},
+    Tree1 = mochiweb_html:parse(<<"<html><br/></html>">>),
+    ?assertEqual(select(Tree1, <<":root">>), [[Tree1]]),
+    Tree2 = mochiweb_html:parse(<<"<html><p id=\"a\"></p><p id=\"b\"></p><p></p></html>">>),
+    Result1 = [[
+            {<<"p">>,[{<<"id">>,<<"a">>}],[]},
             {<<"p">>,[],[]}
-        ]]),
+        ]],
+    ?assertEqual(select(Tree2, <<"p:not(#b)">>), Result1),
+    ?assertEqual(select(Tree2, <<"p:nth-child(2n-1)">>), Result1),
+    ?assertEqual(select(Tree2, <<"p:nth-child(odd)">>), Result1),
     ?assertEqual(
-        select(Tree4, <<"p:first-child">>),
+        select(Tree2, <<"p:first-child">>),
         [[
             {<<"p">>,[{<<"id">>,<<"a">>}],[]}
         ]]),
-    ?assertEqual(
-        select(Tree4, <<"p:nth-child(2n-1)">>),
-        [[
-            {<<"p">>,[{<<"id">>,<<"a">>}],[]}
-        ]]),
-    ?assertEqual(
-        select(Tree4, <<"p:nth-child(odd)">>),
-        [[
-            {<<"p">>,[{<<"id">>,<<"a">>}],[]}
-        ]]),
+    Result2 = [[{<<"p">>,[],[]}]],
+    ?assertEqual(select(Tree2, <<"p:last-child">>), Result2),
+    ?assertEqual(select(Tree2, <<"p:last-child">>), Result2),
+    Tree3 = mochiweb_html:parse(<<"<html><p id=\"a\"></p><div></div><p></p><div id=\"b\"></div></html>">>),
+    ?assertEqual(select(Tree3, <<"p:last-of-type">>), Result2),
+    ?assertEqual(select(Tree3, <<"p:nth-of-type(n+1)">>), Result1),
+    ?assertEqual(select(Tree3, <<"p:nth-last-of-type(n+1)">>), Result1),
+    ?assertEqual(select(Tree3, <<"p:nth-of-type(even)">>), Result2),
     ok.
 
 -endif.
