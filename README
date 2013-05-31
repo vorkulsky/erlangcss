@@ -1,0 +1,8 @@
+CSS3-Selectors for Mochiweb html-tree.
+
+Usage:
+    Selected = erlangcss:select(Tree, Selector).
+
+Tree        Mochiweb html-tree.
+Selector    CSS3-Selector string or binary.
+Selected    list of lists of Mochiweb html-trees.
