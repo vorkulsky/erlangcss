@@ -231,7 +231,7 @@ pc_nth(Element={_, Ref, _, _}, Fathers, Class, Args) ->
                     _ -> Siblings
                 end,
             find_itself_nth(Ref, RSiblings, length(RSiblings), 0, Pair);
-        _ -> pc_only(Element, Fathers, Class, Args)
+        _ -> pc_only(Element, Fathers, Class)
     end.
 
 get_siblings(Element, [root], _) -> [Element];
@@ -257,6 +257,7 @@ find_itself_nth(_, _, Len, Counter, _) when Counter > Len -> false;
 find_itself_nth(Ref, Siblings, Len, Counter, Pair={A, B}) ->
     Result = A*Counter + B,
     if
+        (Result < 1) and (A < 1) -> false;
         Result < 1 -> find_itself_nth(Ref, Siblings, Len, Counter+1, Pair);
         Result > Len -> false;
         true -> Sibling = lists:nth(Result, Siblings),
@@ -293,13 +294,23 @@ analyze_captured_first(Equation, A, {_, 1}) ->
 analyze_captured_second(Equation, C) ->
     list_to_integer(binary_to_list(binary:part(Equation, C))).
 
-pc_only(Element, Fathers, Class, Args) ->
+pc_only({Type, Ref, _, _}, Fathers, Class) ->
     Match = re:run(Class, <<"^only-(?:child|(of-type))$">>),
     case Match of
-        {match, [_, {_, 0}]} -> true;
-        {match, _} -> true;
+        {match, [_]} -> only_children(Ref, Fathers, notype);
+        {match, _} -> only_children(Ref, Fathers, Type);
         _ -> false
     end.
+
+only_children(_, [root], _) -> true;
+only_children(Ref, [{_, _, _, Children} | _], Type) ->
+    only(Ref, Children, Type).
+
+only(_, [], _) -> true;
+only(Ref, [{_, Ref, _, _} | Tail], Type) -> only(Ref, Tail, Type);
+only(_, [{_, _, _, _} | _], notype) -> false;
+only(_, [{Type, _, _, _} | _], Type) -> false;
+only(Ref, [_ | Tail], Type) -> only(Ref, Tail, Type).
 
 compile(Css) ->
     BCss = iolist_to_binary(Css),
@@ -717,9 +728,10 @@ find_itself_nth_test() ->
     ?assertEqual(find_itself_nth(Ref, Siblings, Len, 0, {0, 2}), true),
     ?assertEqual(find_itself_nth(Ref, Siblings, Len, 0, {0, 3}), false),
     ?assertEqual(find_itself_nth(Ref, Siblings, Len, 0, {3, -7}), true),
+    ?assertEqual(find_itself_nth(Ref, Siblings, Len, 0, {-1, 0}), false),
     ok.
 
-select_by_pc_test() ->
+select_by_pc_simple_test() ->
     ?assertEqual(
         select(mochiweb_html:parse(<<"<html><p checked></p><p selected></p><p></p></html>">>), <<":checked">>),
         [[
@@ -734,27 +746,45 @@ select_by_pc_test() ->
         ]]),
     Tree1 = mochiweb_html:parse(<<"<html><br/></html>">>),
     ?assertEqual(select(Tree1, <<":root">>), [[Tree1]]),
-    Tree2 = mochiweb_html:parse(<<"<html><p id=\"a\"></p><p id=\"b\"></p><p></p></html>">>),
+    ?assertEqual(
+        select(mochiweb_html:parse(<<"<html><p id=\"a\"></p><p id=\"b\"></p><p></p></html>">>), <<"p:not(#b)">>),
+        [[
+            {<<"p">>,[{<<"id">>,<<"a">>}],[]},
+            {<<"p">>,[],[]}
+        ]]),
+    ok.
+
+select_by_pc_nth_test() ->
+    Tree1 = mochiweb_html:parse(<<"<html><p id=\"a\"></p><p id=\"b\"></p><p></p></html>">>),
     Result1 = [[
             {<<"p">>,[{<<"id">>,<<"a">>}],[]},
             {<<"p">>,[],[]}
         ]],
-    ?assertEqual(select(Tree2, <<"p:not(#b)">>), Result1),
-    ?assertEqual(select(Tree2, <<"p:nth-child(2n-1)">>), Result1),
-    ?assertEqual(select(Tree2, <<"p:nth-child(odd)">>), Result1),
+    ?assertEqual(select(Tree1, <<"p:nth-child(2n-1)">>), Result1),
+    ?assertEqual(select(Tree1, <<"p:nth-child(odd)">>), Result1),
     ?assertEqual(
-        select(Tree2, <<"p:first-child">>),
+        select(Tree1, <<"p:first-child">>),
         [[
             {<<"p">>,[{<<"id">>,<<"a">>}],[]}
         ]]),
     Result2 = [[{<<"p">>,[],[]}]],
-    ?assertEqual(select(Tree2, <<"p:last-child">>), Result2),
-    ?assertEqual(select(Tree2, <<"p:last-child">>), Result2),
-    Tree3 = mochiweb_html:parse(<<"<html><p id=\"a\"></p><div></div><p></p><div id=\"b\"></div></html>">>),
-    ?assertEqual(select(Tree3, <<"p:last-of-type">>), Result2),
-    ?assertEqual(select(Tree3, <<"p:nth-of-type(n+1)">>), Result1),
-    ?assertEqual(select(Tree3, <<"p:nth-last-of-type(n+1)">>), Result1),
-    ?assertEqual(select(Tree3, <<"p:nth-of-type(even)">>), Result2),
+    ?assertEqual(select(Tree1, <<"p:last-child">>), Result2),
+    ?assertEqual(select(Tree1, <<"p:last-child">>), Result2),
+    Tree2 = mochiweb_html:parse(<<"<html><p id=\"a\"></p><div></div><p></p><div id=\"b\"></div></html>">>),
+    ?assertEqual(select(Tree2, <<"p:last-of-type">>), Result2),
+    ?assertEqual(select(Tree2, <<"p:nth-of-type(n+1)">>), Result1),
+    ?assertEqual(select(Tree2, <<"p:nth-last-of-type(n+1)">>), Result1),
+    ?assertEqual(select(Tree2, <<"p:nth-of-type(even)">>), Result2),
+    ok.
+
+select_by_pc_only_test() ->
+    Tree1 = mochiweb_html:parse(<<"<html><div></div><p></p><div>Text1<br/>Text2</div></html>">>),
+    ?assertEqual(select(Tree1, <<"*:only-child:not(html)">>), [[{<<"br">>,[],[]}]]),
+    ?assertEqual(select(Tree1, <<"p:only-of-type">>), [[{<<"p">>,[],[]}]]),
+    ?assertEqual(select(Tree1, <<"div:only-of-type">>), [[]]),
+    ?assertEqual(select(Tree1, <<"br:only-of-type">>), [[{<<"br">>,[],[]}]]),
+    Tree2 = mochiweb_html:parse(<<"<html><div>Text</div><p></p><div></div></html>">>),
+    ?assertEqual(select(Tree2, <<"div:only-child">>), [[]]),
     ok.
 
 -endif.
